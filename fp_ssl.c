@@ -232,6 +232,12 @@ static void ssl_find_match(struct ssl_sig* ts) {
     /* Cipher suites match. */
     if (match_sigs(rs->cipher_suites, ts->cipher_suites) != 0) continue;
 
+    /* Curves match. */
+    if (match_sigs(rs->curves, ts->curves) != 0) continue;
+
+    /* EC Point Formats match. */
+    if (match_sigs(rs->ec_point_fmts, ts->ec_point_fmts) != 0) continue;
+
     ts->matched = ref;
     return;
 
@@ -347,6 +353,12 @@ truncated:
   sig->extensions = ck_alloc(1 * sizeof(u32));
   sig->extensions[0] = END_MARKER;
 
+  sig->curves = ck_alloc(1 * sizeof(u32));
+  sig->curves[0] = END_MARKER;
+
+  sig->ec_point_fmts = ck_alloc(1 * sizeof(u32));
+  sig->ec_point_fmts[0] = END_MARKER;
+
   return 1;
 
 
@@ -355,6 +367,8 @@ too_short:
   DEBUG("[#] SSLv2 frame too short.\n");
 
   ck_free(sig->cipher_suites);
+  ck_free(sig->curves);
+  ck_free(sig->ec_point_fmts);
   ck_free(sig->extensions);
 
   return -1;
@@ -556,6 +570,56 @@ static int fingerprint_ssl_v3(struct ssl_sig* sig, const u8* fragment,
     /* Extension payload sane? */
     if (pay > tmp_end) break;
 
+    /* Parse supported curves extension */
+    if (ext_type == 10) {
+        if (ext_len < 2) {
+          DEBUG("[#] SSL ext_len=%u is too short for supported curves.\n", ext_len);
+          return -1;
+        }
+        u16 curves_len = (extension[0] << 8) | extension[1];
+        if (curves_len+2 != ext_len) {
+          DEBUG("[#] SSL ext_len=%u is not equal to curves_len=%u+2.\n", ext_len, curves_len);
+          return -1;
+        }
+        if (curves_len % 2) {
+
+          DEBUG("[#] SSL curves_len=%u is not even.\n", curves_len);
+          return -1;
+
+        }
+        int curves_pos = 0;
+        int ext_pos = 2;
+        sig->curves = ck_alloc(((curves_len / 2) + 1) * sizeof(u32));
+        while (ext_pos < ext_len) {
+            sig->curves[curves_pos] = (extension[ext_pos] << 8) | extension[ext_pos+1];
+            curves_pos += 1;
+            ext_pos += 2;
+        }
+        sig->curves[curves_pos] = END_MARKER;
+    }
+
+    /* Parse supported elliptic curve point formats extension */
+    if (ext_type == 11) {
+        if (ext_len < 2) {
+          DEBUG("[#] SSL ext_len=%u is too short for ec point formats.\n", ext_len);
+          return -1;
+        }
+        u8 ec_point_fmts_len = extension[0];
+        if (ec_point_fmts_len + 1 != ext_len) {
+          DEBUG("[#] SSL ext_len=%u is not equal to ec_point_fmts_len=%u+1.\n", ext_len, ec_point_fmts_len);
+          return -1;
+        }
+        int ec_point_fmts_pos = 0;
+        int ext_pos = 1;
+        sig->ec_point_fmts = ck_alloc((ec_point_fmts_len + 1) * sizeof(u32));
+        while (ext_pos < ext_len) {
+            sig->ec_point_fmts[ec_point_fmts_pos] = extension[ext_pos];
+            ec_point_fmts_pos += 1;
+            ext_pos += 1;
+        }
+        sig->ec_point_fmts[ec_point_fmts_pos] = END_MARKER;
+    }
+
     /* Ignore the actual value of the extenstion. */
     extension = extension;
   }
@@ -601,6 +665,16 @@ truncated_ok:
     sig->extensions[0] = END_MARKER;
   }
 
+  if (!sig->curves) {
+    sig->curves    = ck_alloc(1*sizeof(u32));
+    sig->curves[0] = END_MARKER;
+  }
+
+  if (!sig->ec_point_fmts) {
+    sig->ec_point_fmts    = ck_alloc(1*sizeof(u32));
+    sig->ec_point_fmts[0] = END_MARKER;
+  }
+
   return 1;
 
 
@@ -609,6 +683,8 @@ too_short:
   DEBUG("[#] SSL packet truncated.\n");
 
   ck_free(sig->cipher_suites);
+  ck_free(sig->curves);
+  ck_free(sig->ec_point_fmts);
   ck_free(sig->extensions);
 
   return -1;
@@ -633,7 +709,8 @@ static u8* dump_sig(struct ssl_sig* sig, u8 fingerprint) {
     rlen += _len;                                    \
   } while (0)
 
-  RETF("%i.%i:", sig->request_version >> 8, sig->request_version & 0xFF);
+  //RETF("%i.%i:", sig->request_version >> 8, sig->request_version & 0xFF);
+  RETF("%x:", sig->request_version);
 
   for (i = 0; sig->cipher_suites[i] != END_MARKER; i++) {
     u32 c = sig->cipher_suites[i];
@@ -651,12 +728,34 @@ static u8* dump_sig(struct ssl_sig* sig, u8 fingerprint) {
   for (i = 0; sig->extensions[i] != END_MARKER; i++) {
     u32 ext = sig->extensions[i];
     if (ext != MATCH_ANY) {
-      u8 optional = 0;
-      if (fingerprint && ext == 0) {
-        optional = 1;
-      }
       RETF("%s%s%x", (i ? "," : ""),
-           ((ext & MATCH_MAYBE) || optional) ? "?" : "",
+           (ext & MATCH_MAYBE) ? "?" : "",
+           ext & ~MATCH_MAYBE);
+    } else {
+      RETF("%s*", (i ? "," : ""));
+    }
+  }
+
+  RETF(":");
+
+  for (i = 0; sig->curves[i] != END_MARKER; i++) {
+    u32 ext = sig->curves[i];
+    if (ext != MATCH_ANY) {
+      RETF("%s%s%x", (i ? "," : ""),
+           (ext & MATCH_MAYBE) ? "?" : "",
+           ext & ~MATCH_MAYBE);
+    } else {
+      RETF("%s*", (i ? "," : ""));
+    }
+  }
+
+  RETF(":");
+
+  for (i = 0; sig->ec_point_fmts[i] != END_MARKER; i++) {
+    u32 ext = sig->ec_point_fmts[i];
+    if (ext != MATCH_ANY) {
+      RETF("%s%s%x", (i ? "," : ""),
+           (ext & MATCH_MAYBE) ? "?" : "",
            ext & ~MATCH_MAYBE);
     } else {
       RETF("%s*", (i ? "," : ""));
@@ -820,7 +919,7 @@ static void fingerprint_ssl(u8 to_srv, struct packet_flow* f,
   /* Client request only. */
   if (to_srv != 1) return;
 
-  ssl_find_match(sig);
+  //ssl_find_match(sig);
 
   struct ssl_sig_record* m = sig->matched;
 
@@ -967,6 +1066,8 @@ u8 process_ssl(u8 to_srv, struct packet_flow* f) {
 
 
   ck_free(sig.cipher_suites);
+  ck_free(sig.curves);
+  ck_free(sig.ec_point_fmts);
   ck_free(sig.extensions);
 
   return 0;

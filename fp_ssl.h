@@ -92,6 +92,10 @@ struct ssl_sig {
 
   u32* extensions;       /* List of SSL extensions, END_MARKER terminated */
 
+  u32* curves;           /* List of SSL elliptic curves, END_MARKER terminated */
+
+  u32* ec_point_fmts;    /* List of SSL elliptic curve point formats, END_MARKER terminated */
+
   u32 flags;             /* SSL flags */
 
   struct ssl_sig_record* matched; /* NULL = no match */
